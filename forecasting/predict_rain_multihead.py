@@ -1,39 +1,3 @@
-"""
-Multi-head forecasting variant.
-
-Architecture:
-  * SHARED LSTM TRUNK on the recent sensor window (T, H, P + derivatives).
-  * TEMPERATURE HEAD: trunk -> Dense, augmented with cyclical seasonality
-    (hour_sin/cos, doy_sin/cos). Temperature is the strongest cyclic
-    variable so it benefits the most from explicit seasonal priors.
-  * HUMIDITY HEAD:    trunk -> Dense, augmented with the temperature head's
-    OWN prediction. Humidity is anti-correlated with temperature, so giving
-    the humidity head the predicted temperature lets it exploit that link
-    instead of re-learning it.
-  * PRESSURE MODEL:   *NOT* an LSTM. A Ridge linear regressor on lagged
-    pressure differences (Delta P over 30 min / 1 h / 3 h / 6 h) plus
-    cyclical hour features. Pressure behaves like a slowly drifting random
-    walk; a simple linear extrapolator is competitive and far less prone to
-    drifting toward a learned mean than an LSTM.
-
-Pipeline:
-  1. Load Redis sensor data and prep features (re-uses predict_rain helpers).
-  2. Build sequences for the LSTM (temperature + humidity targets).
-  3. Build a tabular dataset for the linear pressure model.
-  4. Train both, evaluate per-target on the held-out test slice.
-  5. Produce the standard forecast.csv + new diagnostic plots:
-       - pressure_residuals.png
-       - pressure_linear_coeffs.png
-       - humidity_vs_temp_scatter.png
-       - per-target forecast_test plots
-       - per-target entire_series plots
-
-Outputs:
-  forecast.csv              (5h forward forecast, 5-min cadence)
-  wind_average.csv          (vector-averaged wind, mirrors predict_rain.py)
-  debug_plots/*.png
-"""
-
 from __future__ import annotations
 
 import sys
@@ -46,7 +10,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Concatenate
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
@@ -511,6 +475,15 @@ def run() -> None:
         df_scaled, feature_cols, LSTM_TARGET_OUT_NAMES, LOOKBACK, val_end, len(df_scaled))
     print(f"[lstm] sequences  train={X_tr.shape}  val={X_va.shape}  test={X_te.shape}")
 
+    # --- DEBUG: sequence slice stats ---
+    for tag, X, Y in [("train", X_tr, Y_tr), ("val", X_va, Y_va), ("test", X_te, Y_te)]:
+        nan_X = int(np.isnan(X).sum())
+        nan_Y = int(np.isnan(Y).sum())
+        print(f"[debug/{tag}] X: min={X.min():.4f}  max={X.max():.4f}  "
+              f"mean={X.mean():.4f}  NaN={nan_X}")
+        print(f"[debug/{tag}] Y: min={Y.min():.4f}  max={Y.max():.4f}  "
+              f"mean={Y.mean():.4f}  NaN={nan_Y}")
+
     season_idx = [feature_cols.index(c) for c in SEASONALITY_COLS]
     # The seasonality side-input is the seasonality at the *current step*
     # being predicted -> last row of each input window.
@@ -518,14 +491,24 @@ def run() -> None:
     S_va = X_va[:, -1, season_idx]
     S_te = X_te[:, -1, season_idx]
 
+    # --- DEBUG: seasonality side-input ---
+    for tag, S in [("train", S_tr), ("val", S_va), ("test", S_te)]:
+        print(f"[debug/season/{tag}] shape={S.shape}  "
+              f"min={S.min():.4f}  max={S.max():.4f}  mean={S.mean():.4f}")
+
     Y_tr_t, Y_tr_h = Y_tr[:, 0:1], Y_tr[:, 1:2]
     Y_va_t, Y_va_h = Y_va[:, 0:1], Y_va[:, 1:2]
     Y_te_t, Y_te_h = Y_te[:, 0:1], Y_te[:, 1:2]
 
+    # --- DEBUG: per-head target slices (scaled) ---
+    for tag, Yt, Yh in [("train", Y_tr_t, Y_tr_h), ("val", Y_va_t, Y_va_h), ("test", Y_te_t, Y_te_h)]:
+        print(f"[debug/targets/{tag}] temp_scaled  min={Yt.min():.4f}  max={Yt.max():.4f}  mean={Yt.mean():.4f}")
+        print(f"[debug/targets/{tag}] hum_scaled   min={Yh.min():.4f}  max={Yh.max():.4f}  mean={Yh.mean():.4f}")
+
     # ---- Build + train LSTM ----
     model = build_multihead_lstm(n_steps=X_tr.shape[1], n_features=X_tr.shape[2])
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=LSTM_LR),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LSTM_LR, clipnorm = 1.0),
         loss={"temperature_out": "mse", "humidity_out": "mse"},
         metrics={"temperature_out": "mae", "humidity_out": "mae"},
     )
@@ -541,13 +524,17 @@ def run() -> None:
         print(f"[lstm] sample_weight: last {n_recent}/{len(sw)} samples "
               f"@ x{RECENT_WEIGHT}")
 
+    rlr = ReduceLROnPlateau(
+        monitor="val_loss", factor=0.5, patience=3, min_lr=1e-5, verbose=1
+    )
+    
     history = model.fit(
         [X_tr, S_tr], [Y_tr_t, Y_tr_h],
         sample_weight=[sw, sw],
         validation_data=([X_va, S_va], [Y_va_t, Y_va_h]),
         epochs=LSTM_EPOCHS,
         batch_size=LSTM_BATCH_SIZE,
-        callbacks=[es],
+        callbacks=[es,rlr],
         shuffle=False,
         verbose=1,
     )
@@ -557,6 +544,14 @@ def run() -> None:
     pred_scaled = np.hstack([t_pred_s, h_pred_s])
     pred_real = targ_scaler.inverse_transform(pred_scaled)
     actual_real = targ_scaler.inverse_transform(Y_te)
+
+    # --- DEBUG: predictions vs actuals after inverse transform ---
+    for i, name in enumerate(LSTM_TARGET_COLS):
+        p, a = pred_real[:, i], actual_real[:, i]
+        print(f"[debug/pred/{name}] pred   min={p.min():.4f}  max={p.max():.4f}  mean={p.mean():.4f}")
+        print(f"[debug/pred/{name}] actual min={a.min():.4f}  max={a.max():.4f}  mean={a.mean():.4f}")
+        print(f"[debug/pred/{name}] delta  min={(p-a).min():.4f}  max={(p-a).max():.4f}  mean={(p-a).mean():.4f}")
+
     for i, name in enumerate(LSTM_TARGET_COLS):
         mae = mean_absolute_error(actual_real[:, i], pred_real[:, i])
         rmse = np.sqrt(mean_squared_error(actual_real[:, i], pred_real[:, i]))
@@ -566,6 +561,19 @@ def run() -> None:
     p_df = build_pressure_features(df_with_targets)
     p_train_end, p_val_end = chronological_split_indices(
         len(p_df), TRAIN_RATIO, VAL_RATIO)
+
+    # --- DEBUG: pressure feature matrix ---
+    feat_cols_debug = [c for c in p_df.columns if c not in ("timestamp", "pressure_target")]
+    print(f"[debug/pressure] p_df shape={p_df.shape}  "
+          f"train_end={p_train_end}  val_end={p_val_end}")
+    for col in feat_cols_debug:
+        s = p_df[col]
+        print(f"[debug/pressure]   {col:12s}  min={s.min():.4f}  max={s.max():.4f}  "
+              f"mean={s.mean():.4f}  NaN={int(s.isna().sum())}")
+    tgt = p_df["pressure_target"]
+    print(f"[debug/pressure]   target       min={tgt.min():.4f}  max={tgt.max():.4f}  "
+          f"mean={tgt.mean():.4f}  NaN={int(tgt.isna().sum())}")
+
     p_model = train_pressure_model(p_df, p_train_end, p_val_end)
 
     # ---- Plots ----
