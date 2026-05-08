@@ -106,7 +106,9 @@ def get_data_from_redis(pattern=REDIS_PATTERN, bucket_size_msec=BUCKET_SIZE_MSEC
         timestamps, values = zip(*data)
 
         frame = pd.DataFrame({
-            "timestamp": pd.to_datetime(timestamps, unit="ms"),
+            "timestamp": pd.to_datetime(timestamps, unit="ms", utc=True)
+                        .tz_convert("Europe/Bucharest")
+                        .tz_localize(None),
             metric_name: pd.to_numeric(values, errors="coerce"),
         })
         series_frames.append(frame)
