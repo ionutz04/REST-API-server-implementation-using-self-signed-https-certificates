@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
@@ -57,6 +58,63 @@ SENSOR_CADENCE_MINUTES = 5  # native sensor cadence
 STEPS_PER_OUTPUT = STEP_MINUTES // SENSOR_CADENCE_MINUTES  # 6 internal steps per row
 TOTAL_OUTPUT_ROWS = (FORECAST_HOURS * 60) // STEP_MINUTES  # 10 rows
 OUTPUT_CSV = "forecast_5h.csv"
+
+
+def plot_temp_relationships(df: pd.DataFrame, save_path: str = "temp_relationships.png") -> None:
+    """Scatter plots of temperature vs pressure and humidity with linear fits.
+
+    Shows that both relationships are largely linear — justifying the separate
+    linear pressure model instead of feeding pressure into the LSTM.
+    """
+    temp = pd.to_numeric(df["temperature"], errors="coerce")
+    pressure = pd.to_numeric(df["pressure"], errors="coerce")
+    humidity = pd.to_numeric(df["humidity"], errors="coerce")
+
+    mask_p = temp.notna() & pressure.notna()
+    mask_h = temp.notna() & humidity.notna()
+    t_p, p = temp[mask_p].values, pressure[mask_p].values
+    t_h, h = temp[mask_h].values, humidity[mask_h].values
+
+    def linear_fit(x, y):
+        coeffs = np.polyfit(x, y, 1)
+        y_hat = np.polyval(coeffs, x)
+        ss_res = np.sum((y - y_hat) ** 2)
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        return coeffs, r2
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Temperature vs Pressure & Humidity — linearity check", fontsize=13)
+
+    # Temperature vs Pressure
+    ax1.scatter(t_p, p, s=6, alpha=0.35, color="#3a86ff", label="samples")
+    coeffs_p, r2_p = linear_fit(t_p, p)
+    x_line = np.linspace(t_p.min(), t_p.max(), 200)
+    ax1.plot(x_line, np.polyval(coeffs_p, x_line),
+             color="#e63946", linewidth=2, label=f"linear fit  R²={r2_p:.3f}")
+    ax1.set_xlabel("Temperature (°C)")
+    ax1.set_ylabel("Pressure (hPa)")
+    ax1.set_title("Temperature vs Pressure")
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    # Temperature vs Humidity
+    ax2.scatter(t_h, h, s=6, alpha=0.35, color="#06d6a0", label="samples")
+    coeffs_h, r2_h = linear_fit(t_h, h)
+    x_line = np.linspace(t_h.min(), t_h.max(), 200)
+    ax2.plot(x_line, np.polyval(coeffs_h, x_line),
+             color="#e63946", linewidth=2, label=f"linear fit  R²={r2_h:.3f}")
+    ax2.set_xlabel("Temperature (°C)")
+    ax2.set_ylabel("Humidity (%)")
+    ax2.set_title("Temperature vs Humidity")
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"[plot] Saved temperature relationship plot → {save_path}")
+    print(f"       Temp↔Pressure R²={r2_p:.3f}   Temp↔Humidity R²={r2_h:.3f}")
 
 
 def train_model(df_with_targets: pd.DataFrame, feature_cols: list):
@@ -112,6 +170,18 @@ def train_model(df_with_targets: pd.DataFrame, feature_cols: list):
         shuffle=False,
         verbose=1,
     )
+
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+    import numpy as np
+
+    t_pred, h_pred = model.predict([X_te, S_te], verbose=0)
+    pred_real = targ_scaler.inverse_transform(np.hstack([t_pred, h_pred]))
+    actual_real = targ_scaler.inverse_transform(Y_te)
+
+    for i, name in enumerate(["temperature_C", "humidity_pct"]):
+        mae = mean_absolute_error(actual_real[:, i], pred_real[:, i])
+        rmse = np.sqrt(mean_squared_error(actual_real[:, i], pred_real[:, i]))
+        print(f"[lstm] {name:14s} test MAE={mae:.4f}  RMSE={rmse:.4f}")
 
     p_df = build_pressure_features(df_with_targets)
     p_train_end, p_val_end = chronological_split_indices(
@@ -221,6 +291,8 @@ def main():
     df = add_seasonality(df)
     df_with_targets = make_targets(df, horizon=TEMP_HORIZON)
     print(f"[main] Rows after prep: {len(df_with_targets)}")
+
+    plot_temp_relationships(df_with_targets)
 
     feature_cols = ["temperature", "humidity", "pressure"] + SEASONALITY_COLS
 
