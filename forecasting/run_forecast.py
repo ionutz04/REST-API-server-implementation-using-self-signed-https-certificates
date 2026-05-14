@@ -172,11 +172,10 @@ def train_model(df_with_targets: pd.DataFrame, feature_cols: list):
     )
 
     from sklearn.metrics import mean_absolute_error, mean_squared_error
-    import numpy as np
-
-    t_pred, h_pred = model.predict([X_te, S_te], verbose=0)
+    
+    t_pred, h_pred = model.predict([X_tr, S_tr], verbose=0)
     pred_real = targ_scaler.inverse_transform(np.hstack([t_pred, h_pred]))
-    actual_real = targ_scaler.inverse_transform(Y_te)
+    actual_real = targ_scaler.inverse_transform(Y_tr)
 
     for i, name in enumerate(["temperature_C", "humidity_pct"]):
         mae = mean_absolute_error(actual_real[:, i], pred_real[:, i])
