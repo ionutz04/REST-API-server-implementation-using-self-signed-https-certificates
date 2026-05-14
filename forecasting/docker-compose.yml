@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  forecast_scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    container_name: forecast_scheduler
+    network_mode: host
+    restart: unless-stopped
+
+
+    working_dir: /home/jetson1/Documents/tests/sht21_REST_API/forecasting
+
+    volumes:
+
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      - /home/jetson1/Documents/tests/sht21_REST_API/forecasting:/home/jetson1/Documents/tests/sht21_REST_API/forecasting
+
+    environment:
+
+      INTERVAL_SECONDS: "18000"
+
+
+      CSV_PATH: "/home/jetson1/Documents/tests/sht21_REST_API/forecasting/forecast_5h.csv"
+
+
+      REDIS_HOST:     "localhost"
+      REDIS_PORT:     "6379"
+      REDIS_DB:       "0"
+
+      # Cheia Redis unde se stochează forecast-ul curent
+      REDIS_KEY: "forecast:latest"
