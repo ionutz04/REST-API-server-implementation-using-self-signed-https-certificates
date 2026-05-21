@@ -4,6 +4,26 @@ A complete, end-to-end IoT weather station built from scratch: custom PCB, FreeR
 
 ---
 
+## Gallery
+
+### Lab prototype → balcony testing → final field deployment
+
+| Lab assembly | First outdoor test | Field deployment |
+|:---:|:---:|:---:|
+| ![Lab assembly](docs/images/IMG_5425_lab.jpeg) | ![Balcony test](docs/images/IMG_5421_balcony.jpeg) | ![Field deployment](docs/images/IMG_5466_deployment.jpeg) |
+| SparkFun weather meter mounted on test stand, breadboard wiring visible, first firmware tests in the lab | Early outdoor validation on a university balcony — breadboard ESP32 still exposed, weather meter fully assembled | Final deployment: custom PCB v2 in enclosure, Stevenson screen housing the BME280, full sensor suite on the balcony rail since 14 April 2026 |
+
+### PCB design
+
+| Front (3D render) | Back (3D render) | Schematic |
+|:---:|:---:|:---:|
+| ![PCB front](docs/images/front_3d.png) | ![PCB back](docs/images/back_3d.png) | ![Schematic](docs/images/schematic.png) |
+| Custom two-layer KiCad PCB v2 | Back copper layer, ground plane | Full circuit schematic |
+
+> All hardware photos: Ploiești, Romania, 2026.
+
+---
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -26,7 +46,7 @@ A complete, end-to-end IoT weather station built from scratch: custom PCB, FreeR
 ## Overview
 
 iGround measures temperature, humidity, barometric pressure, wind speed, wind direction, rainfall, and PM2.5 particulate matter in real time. Every 5 minutes the ESP32 edge node sends a JWT-authenticated HTTPS POST to a Flask backend running on the Jetson Orin Nano. Every 5 hours, a forecasting container retrains a multi-head LSTM and a Ridge regression model from scratch on all accumulated data and writes 5-hour ahead predictions back to Redis TimeSeries. A Grafana dashboard and a Flutter mobile app consume the data and forecasts in real time.
-
+![alt text](images/ms1.png)
 **Key numbers at a glance:**
 
 | Metric | Value |
@@ -80,7 +100,7 @@ iGround measures temperature, humidity, barometric pressure, wind speed, wind di
 3. Validated readings are written to Redis TimeSeries keys `sensor:{chip_id}:{metric}` and compacted hourly to `sensor:{chip_id}:{metric}:hourly`.
 4. Every 5 hours the forecasting container starts, reads all data from Redis, retrains the LSTM and Ridge models, writes 10 forecast rows per metric to `forecast:{metric}` keys, and exits.
 5. Grafana reads all keys via the Redis TimeSeries datasource plugin and serves data to both the browser dashboard and the Flutter app through its REST API (`/api/ds/query`).
-
+![alt text](images/ms3.png)
 ---
 
 ## Hardware
@@ -102,6 +122,16 @@ Designed in KiCad, manufactured as a two-layer board. The second revision correc
 
 **Power budget:** ~96 mA typical, ~271 mA peak (during TLS handshake).
 
+### Development phases
+
+The station went through three physical iterations before the final deployment:
+
+| Phase | Description |
+|-------|-------------|
+| Breadboard | Initial sensor wiring, Arduino framework, SHT21 + MS5611 |
+| Perfboard | First semi-permanent layout, sensor replacement with BME280 |
+| Custom PCB v2 | KiCad two-layer board, fixed footprints, enclosure mounting |
+
 ---
 
 ## Firmware (ESP32)
@@ -119,7 +149,9 @@ Written in C using the native **ESP-IDF** toolchain (migrated from Arduino for S
 | `rain_task` | 2 048 B | ISR-driven tipping bucket counter (0.2794 mm/tip) |
 | `gp2y_task` | 2 048 B | 320 µs LED pulse, ADC sample at 280 µs |
 
-> **Note on stack size:** `rest_worker_task` uses 16 KB because mbedTLS TLS handshake, HMAC-SHA256, and JSON serialisation all run in the same task context. The value was determined with `uxTaskGetStackHighWaterMark()`.
+> **Note on stack size:** `rest_worker_task` uses 16 KB because mbedTLS TLS handshake,
+> HMAC-SHA256, and JSON serialisation all run in the same task context.
+> The value was determined with `uxTaskGetStackHighWaterMark()`.
 
 ### Security
 
@@ -160,13 +192,17 @@ forecast:{metric}                   # 10-step 5-h ahead predictions
 
 ### AAA security model
 
-Every incoming request goes through **Authentication** (JWT signature check), **Authorisation** (chip-ID whitelist match), and **Accounting** (MySQL audit log entry). Unauthenticated or unknown devices are rejected at the Flask layer before any data reaches Redis.
+Every incoming request goes through **Authentication** (JWT signature check),
+**Authorisation** (chip-ID whitelist match), and **Accounting** (MySQL audit log entry).
+Unauthenticated or unknown devices are rejected at the Flask layer before any data reaches Redis.
 
 ---
 
 ## Machine Learning & Forecasting
 
-The forecasting container runs on the Jetson's **1024-core Ampere GPU** (CUDA 12.6, driver 540.4.0, JetPack 6.x). Because the Jetson uses unified LPDDR5 memory, tensors built from Redis data are immediately accessible to the GPU with no explicit copy.
+The forecasting container runs on the Jetson's **1024-core Ampere GPU**
+(CUDA 12.6, driver 540.4.0, JetPack 6.x). Because the Jetson uses unified LPDDR5 memory,
+tensors built from Redis data are immediately accessible to the GPU with no explicit copy.
 
 ### Model architecture
 
@@ -177,7 +213,9 @@ The forecasting container runs on the Jetson's **1024-core Ampere GPU** (CUDA 12
 | Pressure | Ridge regression | R²=0.238 vs temperature — largely independent, autocorrelation dominates |
 | Rain probability | Sigmoid of ΔP tendency | Falling pressure → precipitation risk |
 
-The T-H coupling is the key architectural insight: temperature and humidity share an LSTM trunk with separate output heads, allowing the model to exploit the inverse Clausius-Clapeyron relationship directly.
+The T-H coupling is the key architectural insight: temperature and humidity share an LSTM
+trunk with separate output heads, allowing the model to exploit the inverse
+Clausius-Clapeyron relationship directly.
 
 ### Training results (held-out test set)
 
@@ -208,7 +246,9 @@ Each retraining run takes approximately **7–10 minutes** on the Jetson GPU.
 
 ### Grafana Dashboard
 
-Serves as both a monitoring dashboard and a **data API middleware** for the Flutter app. The Flutter app never connects to Redis directly — all data goes through Grafana's `/api/ds/query` endpoint using Basic Auth.
+Serves as both a monitoring dashboard and a **data API middleware** for the Flutter app.
+The Flutter app never connects to Redis directly — all data goes through Grafana's
+`/api/ds/query` endpoint using Basic Auth.
 
 Dashboard rows:
 1. Live scalar gauges (T, H, P, wind, rain, PM2.5, battery)
@@ -229,7 +269,8 @@ Cross-platform (Android + iOS), connects to Grafana's REST API over HTTPS.
 | `POST /api/ds/query` | Sensor data + forecasts from Redis |
 | `GET /api/admin/users` | User management (admin only) |
 
-**Architecture:** three-layer — `GrafanaService` singleton → `StatefulWidget` with `Timer.periodic(5s)` + `Future.wait` → stateless UI widgets.
+**Architecture:** three-layer — `GrafanaService` singleton →
+`StatefulWidget` with `Timer.periodic(5s)` + `Future.wait` → stateless UI widgets.
 
 ---
 
@@ -244,4 +285,7 @@ Cross-platform (Android + iOS), connects to Grafana's REST API over HTTPS.
 | Retraining time | 7–10 min/cycle on Jetson GPU |
 | Redis write latency | < 1 s (pipeline batch) |
 
-The pressure model MAE varied slightly across deployment (0.0145–0.0187 hPa), with a temporary increase during a frontal passage on 12–13 May. The model recovered as new data from that weather regime was accumulated — expected behaviour for a continuously retrained model.
+The pressure model MAE varied slightly across deployment (0.0145–0.0187 hPa),
+with a temporary increase during a frontal passage on 12–13 May.
+The model recovered as new data from that weather regime was accumulated —
+expected behaviour for a continuously retrained model.
