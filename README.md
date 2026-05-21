@@ -1,115 +1,247 @@
-# 🌦️ SHT21 REST API - IoT Weather Monitoring Station
+# iGround — Autonomous IoT Meteorological Station
 
-![Project Status](https://img.shields.io/badge/Status-Completed-success)
-![Platform](https://img.shields.io/badge/Platform-ESP32%20%7C%20Jetson%20Nano-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-
-**Collaborators:** Ionescu Ionut
+A complete, end-to-end IoT weather station built from scratch: custom PCB, FreeRTOS firmware on an ESP32, a containerised backend on an NVIDIA Jetson Orin Nano, a multi-head LSTM forecasting pipeline, a Grafana dashboard, and a Flutter mobile app. The system has been running continuously and autonomously since **14 April 2026**.
 
 ---
 
-## 📝 General Description
+## Table of Contents
 
-This project implements a robust **IoT Weather Monitoring Station** designed for high-accuracy environmental data acquisition. The system is built around an **ESP32 microcontroller** running FreeRTOS (via ESP-IDF) and integrates with a local **NVIDIA Jetson Nano** gateway for data processing and storage.
-
-### System Architecture
-- **Edge Node (ESP32):** Collects sensor data via I²C, ADC, and Interrupt Service Routines (ISR).
-- **Communication:** Secure HTTPS transmission (Ad-Hoc WiFi) to a Flask REST API.
-- **Backend:** Redis TimeSeries database for high-speed storage.
-- **Visualization:** Real-time Grafana dashboards.
-
-### 🔑 Key Features
-| Feature | Description |
-| :--- | :--- |
-| **Real-time Acquisition** | Low-latency polling of temperature, humidity, pressure, and wind metrics. |
-| **Secure Transport** | JWT-authenticated HTTPS transmission between edge and gateway. |
-| **Data Integrity** | Time-series storage with automatic aggregation and persistence. |
-| **Visualization** | Custom Grafana dashboards for instant monitoring. |
-| **Export Capability** | CSV data export for offline meteorological analysis. |
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Hardware](#hardware)
+- [Firmware (ESP32)](#firmware-esp32)
+- [Backend](#backend)
+- [Machine Learning & Forecasting](#machine-learning--forecasting)
+- [Presentation Layer](#presentation-layer)
+- [Deployment & Results](#deployment--results)
+- [Getting Started](#getting-started)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Troubleshooting](#troubleshooting)
+- [File Structure](#file-structure)
+- [License](#license)
 
 ---
 
-## 🧾 BOM (Bill Of Materials)
+## Overview
 
+iGround measures temperature, humidity, barometric pressure, wind speed, wind direction, rainfall, and PM2.5 particulate matter in real time. Every 5 minutes the ESP32 edge node sends a JWT-authenticated HTTPS POST to a Flask backend running on the Jetson Orin Nano. Every 5 hours, a forecasting container retrains a multi-head LSTM and a Ridge regression model from scratch on all accumulated data and writes 5-hour ahead predictions back to Redis TimeSeries. A Grafana dashboard and a Flutter mobile app consume the data and forecasts in real time.
 
-| # | Component | Quantity | Description | Interface/Notes |
-|:-:|:---|:-:|:---|:---|
-| 1 | **ESP32 DevKit** | 1 | ESP32-WROOM-32 Development Board | Main Controller |
-| 2 | **SHT21** | 1 | Digital Temp & Humidity Sensor | I²C (0x40) |
-| 3 | **MS5611** | 1 | Barometric Pressure Sensor | I²C |
-| 4 | **GP2Y Series** | 1 | Optical Dust Sensor (e.g., GP2Y1014AU0F) | Analog + LED Pulse |
-| 5 | **SparkFun Weather Meter** | 1 | [SEN-15901](https://www.sparkfun.com/products/15901) Kit | Wind/Rain Assembly |
-| 6 | **10kΩ Resistors** | 2 | 1/4W Resistors | Voltage Divider (Wind Vane) |
-| 7 | **Nvidia Jetson Nano** | 1 | Orin / 8GB Model | Gateway & ML Server |
-| 8 | **Power Supply** | 1 | 5V DC Source | Reliable supply for ESP32 |
-| 9 | **Enclosure** | 1 | IP65/Weatherproof Box | Outdoor deployment |
+**Key numbers at a glance:**
 
-### 🔌 Sensor Pinout Configuration
-| Sensor | Signal Type | ESP32 Pin | Logic |
-| :--- | :--- | :--- | :--- |
-| **Anemometer** | Digital (Pulse) | `GPIO32` | ISR (Falling Edge) |
-| **Wind Vane** | Analog (ADC) | `GPIO36` | Voltage Divider Network |
-| **Rain Gauge** | Digital (Pulse) | `GPIO33` | ISR (Debounced) |
-| **GP2Y1014**| LED - Digital ; photodetector - Analog | `GPIO34` | The LED toggles on 20 $\mu s$ and the analog pin reads the time interval between "the start" of the dust particle and the end of it  |
-| **SHT21** | I²C | `SDA/SCL` on address `0x40` | Polling Task |
-| **MS5611** | I²C | `SDA/SCL` on address `0x70` | Polling Task |
----
-
-## 🧐 Technical FAQ
-
-### Q1: What is the system boundary?
-The system encompasses the **ESP32 firmware** (edge) and the **Jetson Nano microservices** (gateway). External dependencies are strictly limited to standard libraries (ESP-IDF, Flask, Redis, Grafana). The REST API implements a custom AAA (Authentication, Authorization, Accounting) model inspired by industry standards.
-
-### Q2: Where does the intelligence live?
-Decision-making is centralized on the **Local Server Gateway (Jetson Nano Orin)**. This device hosts the containerized microservices and executes forecasting algorithms. The ESP32 acts as a "dumb" reliable data pipe.
-
-### Q3: What were the primary engineering challenges?
-1.  **State Management:** Implementing Non-Deterministic Finite Automata logic for the REST API to handle MySQL cursors, Redis connections, and JWT verification simultaneously without race conditions.
-2.  **Firmware Stability:** Early versions suffered from frequent disconnects due to blocking MySQL cursors freezing the Docker container. Transitioning to a Gunicorn worker model and an asynchronous automata architecture resolved this.
-
-### Q4: Why is this not just a tutorial?
-This is not a copy-paste hobby project. It addresses a specific engineering constraint: **"How to build a meteorological station with low latency but high forecasting accuracy."** The architecture prioritizes data integrity and system autonomy over simplicity.
+| Metric | Value |
+|--------|-------|
+| Uptime since deployment | 30+ days continuous (since 14 Apr 2026) |
+| Forecast cycles completed | ~144 autonomous (no manual intervention) |
+| Temperature forecast MAE | 0.29 °C (within BME280 ±0.5 °C spec) |
+| Humidity forecast MAE | 0.92 %RH (within BME280 ±3 %RH spec) |
+| Pressure forecast MAE | 0.018 hPa (Ridge regression) |
+| Sensor polling interval | 5 minutes |
+| Forecast retraining interval | 5 hours |
 
 ---
 
-## 📅 Development Timeline
+## Architecture
 
-### Phase 1: Prototyping (Arduino Framework)
-* **20 Dec 2025 - 03 Jan 2026:** Project initiation. Initial implementation using Arduino framework for ESP32 and Flask for the backend, implementation which turned up to be very unstable and very unefficient in battery life for the MCU.
-* **14 Jan 2026:** Hardware arrival (SparkFun Meter Kit). Beta testing begins, transfering the initial flask web app to a more production ready system, using multi-threaded solution like gunicorn, sepparating each route task to every worker.
-* **14 Jan 2026 - 18 Jan 2026:** Completion of the Arduino-based prototype. Data gathering initiated for initial model training.
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Edge Node                                                       │
+│  ESP32-WROOM-32 · Custom PCB v2                                  │
+│  BME280 · GP2Y · SparkFun Weather Meter                          │
+│  FreeRTOS · ESP-IDF · mbedTLS HMAC-SHA256 JWT                    │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │ HTTPS POST /sensor  (JWT, every 5 min)
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Gateway — NVIDIA Jetson Orin Nano (JetPack 6.x)                 │
+│                                                                  │
+│  ┌─────────────┐  ┌──────────┐  ┌────────┐  ┌────────────────┐   │
+│  │ Flask + AAA │  │  MySQL   │  │ Redis  │  │  Forecasting   │   │
+│  │ Gunicorn    │─►│ audit log│  │ Time   │  │  Container     │   │
+│  │ Nginx/TLS   │  └──────────┘  │ Series │◄─│  LSTM + Ridge  │   │
+│  └─────────────┘                └───┬────┘  │  (every 5h)    │   │
+│                                     │       └────────────────┘   │
+│  (all services managed by Docker Compose)                        │
+└─────────────────────────────────────┬────────────────────────────┘
+                                      │
+                    ┌─────────────────┴──────────────────┐
+                    │                                    │
+                    ▼                                    ▼
+          ┌──────────────────┐               ┌─────────────────────┐
+          │ Grafana Dashboard│               │  Flutter Mobile App │
+          │ (browser, local) │               │  Android · iOS      │
+          └──────────────────┘               └─────────────────────┘
+```
 
-### Phase 2: Refactoring (ESP-IDF Migration)
-* **20 Jan 2026:** **Critical Decision:** The Arduino framework proved resource-heavy and inefficient. Decision made to migrate to **ESP-IDF** (Espressif IoT Development Framework). The inefficency was found when it was tring a more battery oriented firmware, the deep sleep implementation on the ESP32 turning out to be full of bugs. (At the end of the day "At the end of the day, Arduino is like training wheels on a bicycle, after you learn to walk, it just hinders you." 😎)
+### Data flow summary
 
-* **22 Jan 2026 - 01 Feb 2026:** **Learing ESP-IDF Stage.**
-    * Learned FreeRTOS task/queue management.
-    * Wrote custom $I^2C$ driver for SHT21.
-    * Migrated from simple loops to multi-tasking architecture.
+1. ESP32 reads sensors, signs a JWT with the shared HMAC-SHA256 secret, and POSTs to `/sensor`.
+2. Flask verifies the JWT signature and validates the chip-ID against a producer whitelist (AAA model).
+3. Validated readings are written to Redis TimeSeries keys `sensor:{chip_id}:{metric}` and compacted hourly to `sensor:{chip_id}:{metric}:hourly`.
+4. Every 5 hours the forecasting container starts, reads all data from Redis, retrains the LSTM and Ridge models, writes 10 forecast rows per metric to `forecast:{metric}` keys, and exits.
+5. Grafana reads all keys via the Redis TimeSeries datasource plugin and serves data to both the browser dashboard and the Flutter app through its REST API (`/api/ds/query`).
 
-### Phase 3: Production Release
-* **04 Feb 2026:** **R&D Complete.**
-    * Final firmware deployed using ESP-IDF.
-    * **Architecture:** Dedicated FreeRTOS tasks for each sensor (SHT21, MS5611, GP2Y) and even for the meter kit sensors, like anemometer, rain gauge and Wind Vane. For interrupt-dependent sensors, like rain gauge and anemometer, it was implemented a queue for each IRS-Task link, being a solution of debounce or other problems which can be induced by noise.
-    * **Connectivity:** Migrated to Ad-Hoc WiFi network (Jetson as AP, ESP32 as STA) for isolated security because the real Meteo Stations are needed in isolated places, and the possibility of not having a wireless connection in order to connect the ESP32 to JON.
+---
 
-### 🚀 Future Roadmap
-* Using the LTSM network it is planed for the final version for the Project presentation to be configured for forcasting
-* Also for this presentation, it is planed to create a custom dashboard for the time series graphs, also being able to have access to the forcasting tab.
+## Hardware
 
-### 📡 PCB design
+### Custom PCB (v2)
 
-* 7th Febrary 2026: Getting done the first prototipe board for this meter kit.
-For now, the state in which stays the custom PCB which it was designed for this project is close to be the final one, the only modifications that are needed are regaring the footprint of the esp32 and sensors like SHT21, MS5611. The GP2Y will be soldered on the board using a JCTC connector, solderd directly on board.
+Designed in KiCad, manufactured as a two-layer board. The second revision corrected all first-iteration footprint errors and added IP65-compatible enclosure mounting points.
 
+**Bill of Materials (key components):**
 
-* 1st March 2026: Second prototipe board for the meter kit:
-   Right now, this is the state in which the project is:
+| Component | Part | Notes |
+|-----------|------|-------|
+| Microcontroller | ESP32-WROOM-32 | Dual-core, Wi-Fi, hardware AES/SHA |
+| T/H/P sensor | Bosch BME280 | I²C 0x76, replaces SHT21 + MS5611 |
+| Dust sensor | Sharp GP2Y1010AU0F | Optical, 320 µs LED pulse |
+| Weather meter | SparkFun SEN-15901 | Anemometer, vane, rain gauge |
+| LDO regulator | AMS1117-3.3 | 5 V → 3.3 V, ~96 mA typical |
+| Protection diode | 1N4148 | Reverse-polarity protection |
 
-   - 3D view:
+**Power budget:** ~96 mA typical, ~271 mA peak (during TLS handshake).
 
-   ![alt text](./images/front_3d.png)
-![alt text](./images/back_3d.png)
+---
 
-   - Schematic:
-   ![alt text](./images/schematic.png)
+## Firmware (ESP32)
+
+Written in C using the native **ESP-IDF** toolchain (migrated from Arduino for SMP FreeRTOS and hardware crypto access).
+
+### FreeRTOS task layout
+
+| Task | Stack | Description |
+|------|-------|-------------|
+| `rest_worker_task` | 16 384 B | JWT generation (mbedTLS HMAC-SHA256) + HTTPS POST |
+| `bme280_task` | 4 096 B | I²C forced-mode read, compensation math |
+| `wind_speed_task` | 2 048 B | ISR-driven anemometer pulse counter |
+| `wind_vane_task` | 2 048 B | ADC + 16-direction lookup table |
+| `rain_task` | 2 048 B | ISR-driven tipping bucket counter (0.2794 mm/tip) |
+| `gp2y_task` | 2 048 B | 320 µs LED pulse, ADC sample at 280 µs |
+
+> **Note on stack size:** `rest_worker_task` uses 16 KB because mbedTLS TLS handshake, HMAC-SHA256, and JSON serialisation all run in the same task context. The value was determined with `uxTaskGetStackHighWaterMark()`.
+
+### Security
+
+- JWT signed with HMAC-SHA256 using the mbedTLS hardware accelerator.
+- TLS 1.2 over HTTPS for all communication.
+- Chip-ID embedded in every JWT payload for server-side device whitelisting.
+
+### Known hardware quirks fixed
+
+- **ADC non-linearity:** mitigated with `esp_adc_cal_characterize()` + `esp_adc_cal_raw_to_voltage()`. Error reduced from ±150 mV to ±30 mV.
+- **BME280 I²C clock stretching:** `i2c_set_timeout()` set to 40 ms to avoid false `ESP_ERR_TIMEOUT` during the 2 ms measurement window.
+
+---
+
+## Backend
+
+All services run on the Jetson Orin Nano via **Docker Compose**.
+
+### Services
+
+| Service | Image | Role |
+|---------|-------|------|
+| `flask` | custom | REST API, JWT verification, AAA |
+| `gunicorn` | custom | WSGI server for Flask |
+| `nginx` | nginx:alpine | TLS termination, reverse proxy |
+| `mysql` | mysql:8 | Audit log, user/device registry |
+| `redis` | redis/redis-stack | TimeSeries data store |
+| `grafana` | grafana/grafana | Dashboard + API middleware |
+| `forecast` | custom (TF2/CUDA) | Runs every 5 h, then exits |
+
+### Redis key schema
+
+```
+sensor:{chip_id}:{metric}           # raw 5-min readings
+sensor:{chip_id}:{metric}:hourly    # auto-compacted hourly aggregates
+forecast:{metric}                   # 10-step 5-h ahead predictions
+```
+
+### AAA security model
+
+Every incoming request goes through **Authentication** (JWT signature check), **Authorisation** (chip-ID whitelist match), and **Accounting** (MySQL audit log entry). Unauthenticated or unknown devices are rejected at the Flask layer before any data reaches Redis.
+
+---
+
+## Machine Learning & Forecasting
+
+The forecasting container runs on the Jetson's **1024-core Ampere GPU** (CUDA 12.6, driver 540.4.0, JetPack 6.x). Because the Jetson uses unified LPDDR5 memory, tensors built from Redis data are immediately accessible to the GPU with no explicit copy.
+
+### Model architecture
+
+| Variable | Model | Rationale |
+|----------|-------|-----------|
+| Temperature | Multi-head LSTM (shared trunk) | Strong diurnal pattern, T-H coupling |
+| Humidity | Multi-head LSTM (shared trunk) | Clausius-Clapeyron coupling with T |
+| Pressure | Ridge regression | R²=0.238 vs temperature — largely independent, autocorrelation dominates |
+| Rain probability | Sigmoid of ΔP tendency | Falling pressure → precipitation risk |
+
+The T-H coupling is the key architectural insight: temperature and humidity share an LSTM trunk with separate output heads, allowing the model to exploit the inverse Clausius-Clapeyron relationship directly.
+
+### Training results (held-out test set)
+
+| Model | MAE | RMSE |
+|-------|-----|------|
+| Temperature (LSTM) | 0.2906 °C | 0.4256 °C |
+| Humidity (LSTM) | 0.9198 %RH | 1.2605 %RH |
+| Pressure (Ridge) | 0.0178 hPa | 0.0245 hPa |
+
+Both LSTM results are within the BME280's own sensor accuracy specification.
+
+### Retraining lifecycle
+
+```
+[scheduler triggers every 5h]
+  → forecasting container starts
+  → reads all data from Redis TimeSeries
+  → retrains LSTM + Ridge from scratch on full dataset
+  → writes 10-row forecast to forecast:* keys
+  → container exits
+```
+
+Each retraining run takes approximately **7–10 minutes** on the Jetson GPU.
+
+---
+
+## Presentation Layer
+
+### Grafana Dashboard
+
+Serves as both a monitoring dashboard and a **data API middleware** for the Flutter app. The Flutter app never connects to Redis directly — all data goes through Grafana's `/api/ds/query` endpoint using Basic Auth.
+
+Dashboard rows:
+1. Live scalar gauges (T, H, P, wind, rain, PM2.5, battery)
+2. Time-series charts (configurable window: 5 min → 30 days)
+3. Wind and rainfall panels
+4. 5-hour forecast overlay (dashed line over live series)
+
+### Flutter Mobile App
+
+Cross-platform (Android + iOS), connects to Grafana's REST API over HTTPS.
+
+**Key endpoints used:**
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/user` | Authentication (Basic Auth) |
+| `GET /api/user/orgs` | Role detection (viewer/editor/admin) |
+| `POST /api/ds/query` | Sensor data + forecasts from Redis |
+| `GET /api/admin/users` | User management (admin only) |
+
+**Architecture:** three-layer — `GrafanaService` singleton → `StatefulWidget` with `Timer.periodic(5s)` + `Future.wait` → stateless UI widgets.
+
+---
+
+## Deployment & Results
+
+| Metric | Value |
+|--------|-------|
+| Deployment start | 14 April 2026 |
+| Continuous uptime | 30+ days |
+| Forecast cycles | ~144 (no manual restarts) |
+| Dataset size (May 2026) | ~7 580 hourly rows and growing |
+| Retraining time | 7–10 min/cycle on Jetson GPU |
+| Redis write latency | < 1 s (pipeline batch) |
+
+The pressure model MAE varied slightly across deployment (0.0145–0.0187 hPa), with a temporary increase during a frontal passage on 12–13 May. The model recovered as new data from that weather regime was accumulated — expected behaviour for a continuously retrained model.
