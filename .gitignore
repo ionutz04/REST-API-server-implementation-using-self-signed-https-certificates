@@ -2,7 +2,6 @@
 *.key
 *.crt
 *.csr
-*.png
 *.jpeg
 *.img
 */venv
