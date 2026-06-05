@@ -17,7 +17,7 @@ A complete, end-to-end IoT weather station built from scratch: custom PCB, FreeR
 
 | Front (3D render) | Back (3D render) | Schematic |
 |:---:|:---:|:---:|
-| ![PCB front](docs/images/front_3d.png) | ![PCB back](docs/images/back_3d.png) | ![Schematic](docs/images/schematic.png) |
+| ![PCB front](images/front_3d.png) | ![PCB back](images/back_3d.png) | ![Schematic](images/schematic.png) |
 | Custom two-layer KiCad PCB v2 | Back copper layer, ground plane | Full circuit schematic |
 
 > All hardware photos: Ploiești, Romania, 2026.
